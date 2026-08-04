@@ -8,9 +8,32 @@ import { prisma } from '../../../lib/prisma';
 import { generateBlurDataUrl, extractPalette } from '../../../lib/image-utils';
 import { getEmbedding } from '../../../lib/embeddings';
 import sharp from 'sharp';
+import { fileTypeFromBuffer } from 'file-type';
+import { rateLimit } from '../../../lib/rate-limit';
+
+const MAX_BYTES = Number(process.env.UPLOAD_MAX_BYTES || 15 * 1024 * 1024); // default 15MB
+const ALLOWED_MIME = (process.env.UPLOAD_ALLOWED_MIME || 'image/jpeg,image/png,image/webp,image/avif').split(',');
+const UPLOAD_RATE_MAX = Number(process.env.UPLOAD_RATE_MAX || 10); // per window
+const UPLOAD_RATE_WINDOW_MS = Number(process.env.UPLOAD_RATE_WINDOW_MS || 60 * 60 * 1000); // 1h
+
+function getClientIp(req: Request) {
+  const forwarded = req.headers.get('x-forwarded-for');
+  if (forwarded) return forwarded.split(',')[0].trim();
+  const real = req.headers.get('x-real-ip');
+  if (real) return real;
+  return 'unknown';
+}
 
 export async function POST(req: Request) {
   try {
+    // basic rate limit per IP
+    const ip = getClientIp(req);
+    try {
+      rateLimit(`upload:${ip}`, UPLOAD_RATE_MAX, UPLOAD_RATE_WINDOW_MS);
+    } catch (err: any) {
+      return NextResponse.json({ error: 'Too many upload requests, try later' }, { status: 429, headers: { 'Retry-After': String(err.retryAfter || 60) } });
+    }
+
     const body = await req.json();
     const { fileName, mimeType, fileBase64, title, description, tags = [], categories = [] } = body || {};
     if (!fileName || !fileBase64) {
@@ -18,6 +41,17 @@ export async function POST(req: Request) {
     }
 
     const buffer = Buffer.from(fileBase64, 'base64');
+    if (buffer.length > MAX_BYTES) {
+      return NextResponse.json({ error: 'File exceeds max allowed size' }, { status: 413 });
+    }
+
+    // detect mime via magic bytes
+    const ft = await fileTypeFromBuffer(buffer);
+    const detected = ft?.mime || mimeType || null;
+    if (!detected || !ALLOWED_MIME.includes(detected)) {
+      return NextResponse.json({ error: 'Unsupported file type' }, { status: 415 });
+    }
+
     const tmpDir = os.tmpdir();
     const tmpPath = path.join(tmpDir, `${Date.now()}-${fileName}`);
     await fs.writeFile(tmpPath, buffer);
@@ -31,7 +65,7 @@ export async function POST(req: Request) {
 
     if (uploadEndpoint && uploadApiKey) {
       const form = new FormData();
-      form.append('file', await fs.readFile(tmpPath), { filename: fileName, contentType: mimeType });
+      form.append('file', await fs.readFile(tmpPath), { filename: fileName, contentType: detected });
       try {
         const resp = await axios.post(uploadEndpoint, form, {
           headers: { ...form.getHeaders(), 'x-api-key': uploadApiKey },

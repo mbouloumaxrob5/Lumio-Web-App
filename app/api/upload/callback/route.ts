@@ -7,9 +7,32 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import sharp from 'sharp';
+import { fileTypeFromBuffer } from 'file-type';
+import { rateLimit } from '../../../lib/rate-limit';
+
+const MAX_BYTES = Number(process.env.UPLOAD_MAX_BYTES || 15 * 1024 * 1024);
+const ALLOWED_MIME = (process.env.UPLOAD_ALLOWED_MIME || 'image/jpeg,image/png,image/webp,image/avif').split(',');
+const UPLOAD_RATE_MAX = Number(process.env.UPLOAD_RATE_MAX || 10);
+const UPLOAD_RATE_WINDOW_MS = Number(process.env.UPLOAD_RATE_WINDOW_MS || 60 * 60 * 1000);
+
+function getClientIp(req: Request) {
+  const forwarded = req.headers.get('x-forwarded-for');
+  if (forwarded) return forwarded.split(',')[0].trim();
+  const real = req.headers.get('x-real-ip');
+  if (real) return real;
+  return 'unknown';
+}
 
 export async function POST(req: Request) {
   try {
+    // rate limit
+    const ip = getClientIp(req);
+    try {
+      rateLimit(`upload_finalize:${ip}`, UPLOAD_RATE_MAX, UPLOAD_RATE_WINDOW_MS);
+    } catch (err: any) {
+      return NextResponse.json({ error: 'Too many finalize requests, try later' }, { status: 429, headers: { 'Retry-After': String(err.retryAfter || 60) } });
+    }
+
     const body = await req.json();
     const { url, publicId, fileName, mimeType, title, description, tags = [], categories = [] } = body || {};
     if (!url) return NextResponse.json({ error: 'Missing url' }, { status: 400 });
@@ -18,7 +41,19 @@ export async function POST(req: Request) {
     const tmpDir = os.tmpdir();
     const tmpPath = path.join(tmpDir, `${Date.now()}-${fileName || 'file'}`);
     const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 120000 });
-    await fs.writeFile(tmpPath, Buffer.from(resp.data));
+    const buf = Buffer.from(resp.data);
+
+    if (buf.length > MAX_BYTES) {
+      return NextResponse.json({ error: 'File exceeds max allowed size' }, { status: 413 });
+    }
+
+    const ft = await fileTypeFromBuffer(buf);
+    const detected = ft?.mime || mimeType || null;
+    if (!detected || !ALLOWED_MIME.includes(detected)) {
+      return NextResponse.json({ error: 'Unsupported file type' }, { status: 415 });
+    }
+
+    await fs.writeFile(tmpPath, buf);
 
     const blurDataUrl = await generateBlurDataUrl(tmpPath, 24);
     const palette = await extractPalette(tmpPath);
