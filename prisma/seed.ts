@@ -1,11 +1,10 @@
 import { PrismaClient } from '@prisma/client';
-import bcrypt from 'bcryptjs';
+import argon2 from 'argon2';
 
 const prisma = new PrismaClient();
 
 async function createExtensionIfMissing() {
   try {
-    // This enables the pgvector extension if the DB user has sufficient rights.
     await prisma.$executeRawUnsafe(`CREATE EXTENSION IF NOT EXISTS vector;`);
     console.log('Ensured pgvector extension exists (if permitted).');
   } catch (err) {
@@ -14,7 +13,6 @@ async function createExtensionIfMissing() {
 }
 
 function randomEmbedding(dim = 1536) {
-  // generate a deterministic-ish small random vector for seed purposes
   return Array.from({ length: dim }, () => Math.random() * 2 - 1);
 }
 
@@ -60,7 +58,12 @@ async function main() {
     const email = `user${i}@example.com`;
     const username = `user${i}`;
     const name = `User ${i}`;
-    const passwordHash = await bcrypt.hash('Password123!', 10);
+    const passwordHash = await argon2.hash('Password123!', {
+      type: argon2.argon2id,
+      memoryCost: 2 ** 16,
+      timeCost: 3,
+      parallelism: 1,
+    });
     const user = await prisma.user.upsert({
       where: { email },
       create: { email, username, name, passwordHash },
@@ -69,7 +72,7 @@ async function main() {
     users.push(user);
   }
 
-  // Images (seed placeholders referencing public/assets — replace with actual uploads via Uploadthing script)
+  // Images (seed placeholders referencing public/assets �� replace with actual uploads via Uploadthing script)
   const sampleImages = [
     { title: 'Golden Hour Forest', file: '/public/assets/seed/forest-1.jpg', tags: ['nature', 'color'] },
     { title: 'Modern Architecture', file: '/public/assets/seed/arch-1.jpg', tags: ['architecture', 'design'] },

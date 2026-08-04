@@ -5,6 +5,7 @@ import GitHubProvider from 'next-auth/providers/github';
 import GoogleProvider from 'next-auth/providers/google';
 import { prisma } from '../lib/prisma';
 import bcrypt from 'bcryptjs';
+import argon2 from 'argon2';
 
 export const authOptions = {
   adapter: PrismaAdapter(prisma),
@@ -20,8 +21,34 @@ export const authOptions = {
         if (!credentials?.email || !credentials?.password) return null;
         const user = await prisma.user.findUnique({ where: { email: credentials.email } });
         if (!user) return null;
-        const valid = await bcrypt.compare(credentials.password, user.passwordHash);
+
+        const storedHash = user.passwordHash;
+        let valid = false;
+
+        try {
+          if (storedHash?.startsWith?.('$argon2')) {
+            valid = await argon2.verify(storedHash, credentials.password);
+          } else {
+            // fallback to bcrypt for legacy users
+            valid = await bcrypt.compare(credentials.password, storedHash);
+            if (valid) {
+              // rehash with argon2 and persist
+              const newHash = await argon2.hash(credentials.password, {
+                type: argon2.argon2id,
+                memoryCost: 2 ** 16,
+                timeCost: 3,
+                parallelism: 1,
+              });
+              await prisma.user.update({ where: { id: user.id }, data: { passwordHash: newHash } });
+            }
+          }
+        } catch (err) {
+          console.error('Password verify error', err);
+          return null;
+        }
+
         if (!valid) return null;
+
         return {
           id: user.id,
           name: user.name,
@@ -48,9 +75,8 @@ export const authOptions = {
   },
   callbacks: {
     async session({ session, user }) {
-      // Attach the user id to the session for client usage
       if (session?.user && user) {
-        // @ts-ignore - next-auth session typings may vary depending on version
+        // @ts-ignore
         session.user.id = user.id;
       }
       return session;

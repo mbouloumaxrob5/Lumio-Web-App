@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '../../../../lib/prisma';
-import bcrypt from 'bcryptjs';
+import argon2 from 'argon2';
 
 export async function POST(req: Request) {
   try {
@@ -20,7 +20,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Email already registered' }, { status: 409 });
     }
 
-    const passwordHash = await bcrypt.hash(password, 10);
+    const passwordHash = await argon2.hash(password, {
+      type: argon2.argon2id,
+      memoryCost: 2 ** 16,
+      timeCost: 3,
+      parallelism: 1,
+    });
+
     const user = await prisma.user.create({
       data: {
         email,
