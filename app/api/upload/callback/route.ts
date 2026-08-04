@@ -9,6 +9,7 @@ import path from 'path';
 import sharp from 'sharp';
 import { fileTypeFromBuffer } from 'file-type';
 import { rateLimit } from '../../../lib/rate-limit';
+import { getS3ObjectBuffer } from '../../../lib/s3';
 
 const MAX_BYTES = Number(process.env.UPLOAD_MAX_BYTES || 15 * 1024 * 1024);
 const ALLOWED_MIME = (process.env.UPLOAD_ALLOWED_MIME || 'image/jpeg,image/png,image/webp,image/avif').split(',');
@@ -28,20 +29,26 @@ export async function POST(req: Request) {
     // rate limit
     const ip = getClientIp(req);
     try {
-      rateLimit(`upload_finalize:${ip}`, UPLOAD_RATE_MAX, UPLOAD_RATE_WINDOW_MS);
+      await rateLimit(`upload_finalize:${ip}`, UPLOAD_RATE_MAX, UPLOAD_RATE_WINDOW_MS);
     } catch (err: any) {
       return NextResponse.json({ error: 'Too many finalize requests, try later' }, { status: 429, headers: { 'Retry-After': String(err.retryAfter || 60) } });
     }
 
     const body = await req.json();
-    const { url, publicId, fileName, mimeType, title, description, tags = [], categories = [] } = body || {};
-    if (!url) return NextResponse.json({ error: 'Missing url' }, { status: 400 });
+    const { url, publicId, objectKey, fileName, mimeType, title, description, tags = [], categories = [] } = body || {};
+    if (!url && !objectKey) return NextResponse.json({ error: 'Missing url or objectKey' }, { status: 400 });
 
-    // download remote file to tmp
+    // download remote file to tmp (S3 path handling)
     const tmpDir = os.tmpdir();
     const tmpPath = path.join(tmpDir, `${Date.now()}-${fileName || 'file'}`);
-    const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 120000 });
-    const buf = Buffer.from(resp.data);
+    let buf: Buffer;
+
+    if (objectKey && process.env.S3_BUCKET && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
+      buf = await getS3ObjectBuffer(objectKey);
+    } else {
+      const resp = await axios.get(url as string, { responseType: 'arraybuffer', timeout: 120000 });
+      buf = Buffer.from(resp.data);
+    }
 
     if (buf.length > MAX_BYTES) {
       return NextResponse.json({ error: 'File exceeds max allowed size' }, { status: 413 });
@@ -69,14 +76,14 @@ export async function POST(req: Request) {
     const creator = await prisma.user.findFirst();
     const creatorConnect = creator ? { connect: { id: creator.id } } : undefined;
 
-    const slug = (title || fileName || path.basename(url)).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    const slug = (title || fileName || (url ? path.basename(url) : 'uploaded')).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 
     const image = await prisma.image.create({ data: {
       title: title || fileName || 'Uploaded image',
       description: description || null,
       slug,
-      url,
-      publicId: publicId || null,
+      url: (process.env.S3_PUBLIC_URL && objectKey) ? `${process.env.S3_PUBLIC_URL.replace(/\/$/, '')}/${objectKey}` : (url || null),
+      publicId: publicId || (objectKey || null),
       width,
       height,
       aspectRatio: width / Math.max(1, height),
