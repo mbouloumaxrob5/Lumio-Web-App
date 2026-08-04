@@ -1,0 +1,271 @@
+// prisma/schema.prisma
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["pgvector", "clientExtensions"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  MODERATOR
+  ADMIN
+}
+
+enum Mood {
+  CALM
+  ENERGETIC
+  MYSTERIOUS
+  WARM
+  COOL
+  NEUTRAL
+  DRAMATIC
+  SERENE
+}
+
+enum ImageStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum NotificationType {
+  LIKE
+  COMMENT
+  FOLLOW
+  COLLECTION_ADD
+  DAILY_LIGHT
+  SYSTEM
+}
+
+model User {
+  id             String      @id @default(uuid())
+  name           String?
+  email          String      @unique
+  emailVerified  DateTime?
+  passwordHash   String
+  avatarUrl      String?
+  bio            String?
+  username       String?     @unique
+  role           Role        @default(USER)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  isActive       Boolean     @default(true)
+  images         Image[]     @relation("UserImages")
+  likes          Like[]
+  collections    Collection[]
+  notifications  Notification[] @relation("recipientNotifications")
+  sentNotifications Notification[] @relation("actorNotifications")
+  accounts       Account[]
+  sessions       Session[]
+  likesReceived  Int         @default(0)
+  postsCount     Int         @default(0)
+
+  @@index([username])
+  @@index([email])
+}
+
+model Image {
+  id             String      @id @default(uuid())
+  title          String
+  description    String?
+  slug           String      @unique
+  status         ImageStatus @default(PUBLISHED)
+  creator        User        @relation("UserImages", fields: [creatorId], references: [id])
+  creatorId      String
+  url            String
+  publicId       String?
+  width          Int?
+  height         Int?
+  aspectRatio    Float?
+  blurDataUrl    String?
+  thumbnailUrl   String?
+  dominantColor  String?
+  palette        Json?
+  mood           Mood?
+  // pgvector embedding: vector dimension 1536 (adjustable)
+  embedding      Float[]?    @db.Vector(1536)
+  tags           ImageTag[]
+  categories     ImageCategory[]
+  likes          Like[]
+  collections    CollectionItem[]
+  isPublic       Boolean     @default(true)
+  viewsCount     Int         @default(0)
+  likesCount     Int         @default(0)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  deletedAt      DateTime?
+  searchVector   String?
+  softGlow       Boolean     @default(false)
+
+  @@index([creatorId])
+  @@index([slug])
+  @@index([mood])
+  @@index([createdAt])
+}
+
+model Like {
+  id        String   @id @default(uuid())
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  image     Image    @relation(fields: [imageId], references: [id])
+  imageId   String
+  createdAt DateTime @default(now())
+
+  @@unique([userId, imageId])
+  @@index([imageId])
+  @@index([userId])
+}
+
+model Category {
+  id          String         @id @default(uuid())
+  name        String
+  slug        String         @unique
+  description String?
+  createdBy   User?          @relation(fields: [createdById], references: [id])
+  createdById String?
+  images      ImageCategory[]
+  createdAt   DateTime       @default(now())
+
+  @@index([slug])
+  @@index([name])
+}
+
+model Tag {
+  id        String      @id @default(uuid())
+  name      String
+  slug      String      @unique
+  usage     Int         @default(0)
+  images    ImageTag[]
+  createdAt DateTime    @default(now())
+
+  @@index([name])
+}
+
+model ImageTag {
+  id      String  @id @default(uuid())
+  image   Image   @relation(fields: [imageId], references: [id])
+  imageId String
+  tag     Tag     @relation(fields: [tagId], references: [id])
+  tagId   String
+  weight  Float   @default(1.0)
+
+  @@unique([imageId, tagId])
+  @@index([tagId])
+  @@index([imageId])
+}
+
+model ImageCategory {
+  id         String   @id @default(uuid())
+  image      Image    @relation(fields: [imageId], references: [id])
+  imageId    String
+  category   Category @relation(fields: [categoryId], references: [id])
+  categoryId String
+
+  @@unique([imageId, categoryId])
+  @@index([categoryId])
+  @@index([imageId])
+}
+
+model Collection {
+  id          String           @id @default(uuid())
+  name        String
+  slug        String           @unique
+  description String?
+  owner       User             @relation(fields: [ownerId], references: [id])
+  ownerId     String
+  isPublic    Boolean          @default(true)
+  isSmart     Boolean          @default(false)
+  settings    Json?
+  items       CollectionItem[]
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@index([ownerId])
+  @@index([slug])
+}
+
+model CollectionItem {
+  id           String   @id @default(uuid())
+  collection   Collection @relation(fields: [collectionId], references: [id])
+  collectionId String
+  image        Image      @relation(fields: [imageId], references: [id])
+  imageId      String
+  position     Int        @default(0)
+  addedAt      DateTime   @default(now())
+
+  @@unique([collectionId, imageId])
+  @@index([collectionId])
+  @@index([imageId])
+}
+
+model Notification {
+  id          String           @id @default(uuid())
+  recipient   User             @relation("recipientNotifications", fields: [recipientId], references: [id])
+  recipientId String
+  actor       User?            @relation("actorNotifications", fields: [actorId], references: [id])
+  actorId     String?
+  type        NotificationType
+  image       Image?           @relation(fields: [imageId], references: [id])
+  imageId     String?
+  payload     Json?
+  isRead      Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+
+  @@index([recipientId, isRead])
+  @@index([createdAt])
+}
+
+model Account {
+  id                 String  @id @default(uuid())
+  user               User    @relation(fields: [userId], references: [id])
+  userId             String
+  type               String
+  provider           String
+  providerAccountId  String
+  refresh_token      String?
+  access_token       String?
+  expires_at         Int?
+  token_type         String?
+  scope              String?
+  id_token           String?
+  session_state      String?
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  user         User     @relation(fields: [userId], references: [id])
+  userId       String
+  expires      DateTime
+  sessionToken String   @unique
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  id         String   @id @default(uuid())
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@index([identifier])
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  action    String
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id])
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([actorId])
+  @@index([createdAt])
+}
